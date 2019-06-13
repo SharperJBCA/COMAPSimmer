@@ -1,0 +1,114 @@
+import numpy as np
+from matplotlib import pyplot
+from scipy.interpolate import interp1d, InterpolatedUnivariateSpline, UnivariateSpline
+
+from COMAPSimmer.Tools import Coordinates
+
+sidrealHours = 23.9344696
+
+class AcquireSource:
+
+    def __init__(self,ra, dec=0, lon=-118.2941,lat=37.2314, minEl = 10, maxEl= 85, minLHA=20):
+        
+        if isinstance(ra, str):
+            self.radec = lambda **kwargs: Coordinates.getPlanetPosition(kwargs['source'], kwargs['lon'], kwargs['lat'], kwargs['mjd'])
+            self.planet = ra
+        else:
+            self.radec = lambda **kwargs: (ra, dec)
+            self.planet = None
+        self.lon = lon
+        self.lat = lat
+
+        self.minEl = minEl
+        self.maxEl = maxEl 
+        self.minLHA = minLHA
+
+    def sourceHorizonRing(self):
+        
+        N = 360*60
+        utc0 = 58400.
+        utc = np.linspace(utc0, utc0+sidrealHours/24.,N)
+        
+        if isinstance(self.planet, type(None)):
+            ra0, dec0 = self.radec()
+        else:
+            ra0, dec0, dist = self.radec(source = self.planet, lon = self.lon ,lat = self.lat , mjd=utc)
+
+        ra = np.zeros(N) + ra0
+        dec = np.zeros(N) + dec0
+
+        az, el, lha = Coordinates.e2h(ra, dec, utc, self.lon, self.lat, return_lha=True)
+        lha = np.mod(lha , 360)
+        lha[lha > 180] = lha[lha > 180] - 360
+
+        utc = (utc - utc0)/(sidrealHours/24.)
+        utc = np.concatenate((utc - 1., utc, utc + 1 ))
+        el  = np.concatenate((el , el, el))
+        az  = np.concatenate((az, az, az))
+        lha  = np.concatenate((lha, lha, lha))
+
+        self.elModel = UnivariateSpline(utc, el,k=4,s=1)
+        elRoots = self.elModel.derivative().roots()
+        elRoots = elRoots[(elRoots > 0) & (elRoots < 1)]
+
+        self.elMinTime = elRoots[np.argmin(self.elModel(elRoots))]
+        self.elModel  = InterpolatedUnivariateSpline(utc, el ,k=4)
+        self.azModel  = InterpolatedUnivariateSpline(utc, az ,k=4)
+        self.lhaModel = InterpolatedUnivariateSpline(utc, lha,k=4)
+
+
+    def getSourceCenters(self, utc0,utc1, dT, raz=0, rel=0):
+
+        
+        lst = np.linspace(0,1,3600)
+        el = self.elModel(lst)
+        lha = self.lhaModel(lst)
+
+        good = (self.minEl < el)# & (el < self.maxEl) & (np.abs(lha) > self.minLHA)
+        lst = lst[good] 
+
+        if len(lst) > 0:
+            lstSearch = np.mod(lst - self.elMinTime, 1)
+            minLstSearch = np.min(lstSearch)
+        
+            NobsPerDay = int((np.max(lstSearch) - np.min(lstSearch+dT/2.))/dT + 0.5)
+
+            getLST=lambda i: np.mod(minLstSearch + dT/2. + dT*i + self.elMinTime, 1)
+            NobLsts = [getLST(i) for i in range(NobsPerDay) if  np.abs(self.lhaModel(getLST(i))) > self.minLHA ]
+
+            rOff = lambda rv: np.random.uniform(low=-0.5, high=0.5)*rv/60.
+
+            NobAz = [self.azModel(getLST(i)) + rOff(raz) for i in range(NobsPerDay) if  np.abs(self.lhaModel(getLST(i))) > self.minLHA ]
+            NobEl = [self.elModel(getLST(i)) + rOff(rel) for i in range(NobsPerDay) if  np.abs(self.lhaModel(getLST(i))) > self.minLHA ]
+
+        else:
+            NobsPerDay = 0
+            NobLsts = []
+            NobEl = []
+            NobAz = []
+        NobsPerDay = len(NobLsts)
+        # How many sidereal days?
+        NDays = utc1 - utc0
+        NSidDays = int(NDays/(sidrealHours/24.) + 0.5)
+        if NSidDays ==0:
+            NSidDays = 1
+
+        NobLstsAll = []
+        NobAzAll = []
+        NobElAll = []
+
+        for i in range(NSidDays): # add this many days
+            NobLstsAll += NobLsts
+            NobAzAll += NobAz
+            NobElAll += NobEl
+
+        
+
+        self.obsStartUTC = (np.array(NobLstsAll) + np.tile(np.arange(NSidDays),NobsPerDay))*sidrealHours/24. + utc0
+        self.obsAz = np.array(NobAzAll)
+        self.obsEl = np.array(NobElAll)
+
+        self.totalNobs = len(NobLstsAll)
+        self.obsAz = self.obsAz[self.obsStartUTC < utc1]
+        self.obsEl = self.obsEl[self.obsStartUTC < utc1]
+        self.obsStartUTC = self.obsStartUTC[self.obsStartUTC < utc1]

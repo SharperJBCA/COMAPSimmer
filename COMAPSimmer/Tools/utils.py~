@@ -1,0 +1,19 @@
+import numpy as np
+import os
+import Parameters
+
+def createDirectories():
+
+    if not os.path.exists(Parameters.COCubeDir):
+        os.makedirs(Parameters.COCubeDir)
+
+    if not os.path.exists(Parameters.DataDir):
+        os.makedirs(Parameters.DataDir)
+
+
+
+def nspace(position, dims):
+    ndims = len(dims)
+    _dims = [int(1)] + dims
+    coords = [np.mod(int(position//np.product(_dims[:i+1])), dims[i]) for i in range(ndims)]
+    return coords
